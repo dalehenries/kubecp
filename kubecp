@@ -1,0 +1,817 @@
+#!/usr/bin/env bash
+
+set -o nounset
+set -o errexit
+
+################################################################################################################
+#####
+#####                                                  USAGE
+#####
+################################################################################################################
+
+# Set the name of this script to whatever the file is named
+ME=$(basename "$0")
+kubecp_version="1.0.0"
+
+version() {
+cat << EOF
+kubecp (Kube Copy) $kubecp_version
+
+EOF
+exit
+}
+
+usage() {
+cat << EOF
+Usage: $ME [options...]
+$ME copies directory contents from and to kubernetes pods while preserving the permissions and ownership of the files.
+
+It can be used to:
+- migrate data from one pod to another (even across different namespaces or clusters) - default behavior
+- backup data from a pod to your local machine - (see --download-only)
+- upload or restore data to a pod from your local machine - (see --upload-only)
+
+Options:
+  -h, --help                    show this help message and exit
+  --version                     print version and exit
+  --interactive <bool>          prompt user for missing information         default: true
+  --src-pod <string>            name of pod to copy files from              (required unless --upload-only=true)
+  --src-dir <string>            path to directory to copy files from        (required unless --upload-only=true)
+  --dst-pod <string>            name of pod to copy files to                (required unless --download-only=true)
+  --dst-dir <string>            path to directory to copy files to          (required unless --download-only=true)
+  --src-context <string>        kubectl context where --src-pod is          default: current kubectl context
+  --src-namespace <string>      namespace of --src-pod                      default: currently set namespace of --src-context
+                                                                                     or 'default' if one isn't set
+  --src-container <string>      name of container in --src-pod to copy
+                                files from
+  --dst-context <string>        kubectl context where --dst-pod is          default: current kubectl context
+  --dst-namespace <string>      namespace --dst-pod is in                   default: currently set namespace of --dst-context
+                                                                                     or 'default' if one isn't set
+  --dst-container <string>      name of container in --dst-pod to copy
+                                files to
+  --overwrite-dst <bool>        contents of --dst-dir will be overwritten   default: false
+                                when not empty
+  --download-only <bool>        skip upload, only download files to         default: false
+                                local machine
+  --upload-only <bool>          skip download, only upload a gzipped        default: false
+                                archive to --dst-pod
+  --keep-local <bool>           leave copy of downloaded archive on         default: false
+                                local machine
+  --dry-run <bool>              do everything but don't actually            default: false
+                                download/upload anything
+  --local-file <string>         name of the gzipped archive stored          default: archive.tar.gz
+                                on local disk
+
+Interactive Mode:
+  The default behavior is to run in interactive mode. In interactive mode, the user will be prompted to provide any
+  additional information needed at runtime.
+
+  For use in automation, interactive mode can be disabled with --interactive false.
+
+  When interactive mode is disabled, some of the options may become required. We recommend running with --dry-run before
+  automation to verify all required options are passed.
+
+Requirements:
+  The machine where this is run needs the following:
+    - kubectl: installed and configured properly
+    - file: BSD cli utility
+    - awk
+  Source and destination containers need the following:
+    - tar
+    - ls
+    - rm
+
+Example:
+    # simple copy from one pod to another using default context and namespace for both
+    $ME --src-pod=old-pod --src-dir=/tmp --dst-pod=new-pod --dst-dir=/tmp
+
+    # download static website files from an nginx container
+    $ME --src-context developer@cluster1 \
+        --src-namespace project-one \
+        --src-pod my-site-nginx \
+        --src-dir /usr/share/nginx/html \
+        --download-only \
+        --local-file my-site-nginx-backup.tar.gz
+
+Source:
+    See https://github.com/dalehenries/kubecp for more info.
+
+EOF
+exit
+}
+
+################################################################################################################
+#####
+#####                                             HELPER FUNCTIONS
+#####
+################################################################################################################
+
+## Print a message to the screen and exit with exit code 1 to signal an error occurred
+##
+## usage: error_and_exit $message
+error_and_exit(){
+    echo -e "$ME: $1"
+    exit 1
+}
+
+## Format number of seconds into days, hours, minutes, seconds
+## Example: '70' becomes  '1m 10s'
+## Credit: https://unix.stackexchange.com/a/27014
+##
+## usage: format_seconds [seconds]
+function format_seconds(){
+    local T=$1
+    local D=$((T/60/60/24))
+    local H=$((T/60/60%24))
+    local M=$((T/60%60))
+    local S=$((T%60))
+    local result=""
+
+    (( D > 0 )) && result="${D}d "
+    (( H > 0 )) && result="${result}${H}h "
+    (( M > 0 )) && result="${result}${M}m "
+    (( S > 0 )) && result="${result}${S}s "
+    echo -e "${result}" | sed -e 's/[[:space:]]*$//'
+}
+
+## Use bash built in $SECONDS variable to determine the number of seconds since
+## [seconds], format it pretty using format_seconds, and print it to the screen.
+##
+## usage: time_since [seconds]
+time_since(){
+    _start="$1"
+    _end=$SECONDS
+    _total=$(( _end - _start ))
+    _display=$(format_seconds $_total)
+    echo "$_display"
+}
+
+## Verify that the passed in variable is a kube context on this machine
+##
+## usage: verify_context_exists [context]
+verify_context_exists(){
+    _context="$1"
+    if ! kubectl config get-contexts -o name | grep -q "$_context"; then
+        error_and_exit "kubectl context '$_context' doesn't exist"
+    fi
+}
+
+## Verify that the passed in namespace exists in the passed in kube context
+##
+## usage: verify_namespace_exists [context] [namespace]
+verify_namespace_exists(){
+    _context="$1"
+    _namespace="$2"
+    if ! kubectl --context "$_context" get ns "$_namespace" &> /dev/null ; then
+        error_and_exit "namespace '$_namespace' doesn't exist in context '$_context'"
+    fi
+}
+
+## Verify the passed in pod exists in the namespace/context
+##
+## usage: verify_pod_exists [context] [namespace] [pod]
+verify_pod_exists(){
+    _context="$1"
+    _namespace="$2"
+    _pod="$3"
+    if ! kubectl --context "$_context" -n "$_namespace" get po "$_pod" &> /dev/null ; then
+        error_and_exit "pod '$_pod' doesn't exist in namespace '$_namespace' in context '$_context'"
+    fi
+}
+
+## Verify the passed in container exists in the pod/namespace/context
+##
+## usage: verify_container_exists [context] [namespace] [pod] [container]
+verify_container_exists(){
+    _context="$1"
+    _namespace="$2"
+    _pod="$3"
+    _container="$4"
+    if [[ $(kubectl --context "$_context" -n "$_namespace" get po "$_pod" -o=jsonpath="{.spec.containers[?(@.name == \"$_container\")].name}" | wc -w) != "1" ]] ; then
+        error_and_exit "container '$_container' doesn't exist in pod '$_pod' in namespace '$_namespace' in context '$_context'"
+    fi
+}
+
+
+### select_container
+#
+# Select which container to use in a pod when the pod has multiple containers and --interactive is true
+#
+# Usage:
+#   selected_container=""
+#   select_container [container_list]
+#   result="$selected_container"
+#
+#   container_list should be a space separated list of container names Ex: 'container-one container-two'
+# Returns:
+#   set's the return value in variable 'selected_container'
+#
+select_container() {
+    num_containers=$(echo "$@" | wc -w)
+
+    PS3="Enter the number of the container to use: "
+
+    # shellcheck disable=SC2068
+    select container in $@
+    do
+        # if entered value is not a single digit number
+        if [[ ! $REPLY =~  ^[0-9]{1}$ ]]; then
+            echo "Invalid selection ($REPLY). Enter a number between 1 and $num_containers"
+        elif [[ $REPLY -gt 0 && $REPLY -le $num_containers ]]; then
+            selection="$container"
+            break;
+        else
+            echo "Invalid selection ($REPLY). Enter a number between 1 and $num_containers"
+        fi
+    done
+
+    selected_container=${selection}
+}
+
+## Verify 'tar', 'ls', & 'rm' are available on the pod/container
+##
+## usage: verify_container_dependencies [context] [namespace] [pod] [container]
+verify_container_dependencies(){
+    _context="$1"
+    _namespace="$2"
+    _pod="$3"
+    _container="$4"
+    if ! kubectl --context "$_context" -n "$_namespace" exec -i "$_pod" -c "$_container" -- tar --version &> /dev/null ; then
+        echo "'tar' was not found on container '$_container' in pod '$_pod'"
+        exit 1
+    elif ! kubectl --context "$_context" -n "$_namespace" exec -i "$_pod" -c "$_container" -- ls --help &> /dev/null ; then
+        echo "'ls' was not found on container '$_container' in pod '$_pod'"
+        exit 1
+    elif ! kubectl --context "$_context" -n "$_namespace" exec -i "$_pod" -c "$_container" -- rm --help &> /dev/null ; then
+        echo "'rm' was not found on container '$_container' in pod '$_pod'"
+        exit 1
+    fi
+}
+
+
+## Verify the passed in directory exists on the pod/container/namespace/context
+##
+## usage: verify_dir_exists [context] [namespace] [pod] [container] [dir]
+verify_dir_exists(){
+    _context="$1"
+    _namespace="$2"
+    _pod="$3"
+    _container="$4"
+    _dir="$5"
+    if ! kubectl --context "$_context" -n "$_namespace" exec -i "$_pod" -c "$_container" -- ls "$_dir" &> /dev/null ; then
+        echo "directory '$_dir' doesn't exist in container '$_container' in pod '$_pod' in namespace '$_namespace' in context '$_context'"
+        exit 1
+    fi
+}
+
+## Verify that the local_file exists and is a gzipped archive
+##
+## usage: verify_archive [FILE]
+verify_archive(){
+    _file="$1"
+    _file_details=$(file "$_file")
+    if echo "$_file_details" | grep "No such file or directory" &> /dev/null ; then
+        error_and_exit "--local-file: '$_file' doesn't exist."
+    elif ! echo "$_file_details" | grep "gzip compressed data" &> /dev/null ; then
+        error_and_exit "--local-file: '$_file' is not a gzipped archive"
+    fi
+}
+
+###################################################
+#####             PROGRESS BAR
+###################################################
+
+progress_cleanup(){
+    message="$1"
+    download_file=${2:-""}
+    if [[ "$download_file" != "" ]]; then
+        # shellcheck disable=SC2012
+        _download_size=$(ls -lh "$download_file" | awk '{ print $5 }')
+        printf "\r%s [%s]                              \n" "$message" "$_download_size"
+    else
+        printf "\r%s                              \n" "$message"
+    fi
+    exit
+}
+
+# usage: show_progress MESSAGE [download_file]
+show_progress(){
+    trap 'progress_cleanup "$message" "$download_file"' SIGUSR1
+    message="$1"
+    download_file=${2:-""}
+
+    _progress=""
+    # _download_size=""
+    loop_count=0
+    while : ; do
+        if [[ "$download_file" != "" ]]; then
+            # shellcheck disable=SC2012
+            _download_size=$(ls -lh "$download_file" | awk '{ print $5 }')
+            printf "\r%s [%s] %s" "$message" "$_download_size" "$_progress"
+        else
+            printf "\r%s %s" "$message" "$_progress"
+        fi
+
+        sleep 1
+        if [ $loop_count -ge 30 ]; then
+            loop_count=0
+            _progress=""
+            printf "\r%s %s                                                 " "$message" "$_progress"
+        else
+            (( loop_count+=1 ))
+            _progress="$_progress."
+        fi
+    done
+}
+
+################################################################################################################
+#####
+#####                                                INPUTS
+#####
+################################################################################################################
+
+interactive=true
+src_pod=""
+src_dir=""
+src_context=""
+src_namespace=""
+src_container=""
+dst_pod=""
+dst_dir=""
+dst_context=""
+dst_namespace=""
+dst_container=""
+overwrite_dst=""
+keep_local=""
+download_only=false
+upload_only=false
+dry_run=false
+local_file="archive.tar.gz"
+
+
+################################################################################################################
+#####
+#####                                             PARSE INPUTS
+#####
+################################################################################################################
+
+parse_inputs() {
+    # if no parameters were passed in
+    if [ "$#" == "0" ]; then
+        error_and_exit "Missing required parameters\nTry '$ME --help' for more information"
+    fi
+
+    # while there are more parameters to parse
+    while (( "$#" )); do
+
+        # -h, --help
+        if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+            usage
+        fi
+        if [[ "$1" == "--version" ]]; then
+            version
+        # --interactive
+        elif [[ "$1" == "--interactive" ]]; then
+            if [[ "$#" == "1" ]]; then interactive=true # last option passed and no value passed
+            else
+                if [[ "$2" == -* ]]; then interactive=true # next field is another option since it starts with '-'
+                else
+                    shift
+                    interactive="$1"
+                    if [[ "$interactive" != "true" && "$interactive" != "false" ]]; then
+                        error_and_exit "--interactive can only be 'true' or 'false'"
+                    fi
+                fi
+            fi
+        # --src-pod
+        elif [[ "$1" == "--src-pod" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then error_and_exit "--src-pod must be followed by the name of the pod"
+            else src_pod="$1"
+            fi
+        # --src-dir
+        elif [[ "$1" == "--src-dir" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then error_and_exit "--src-dir must be followed by a directory"
+            else src_dir="$1"
+            fi
+        # --dst-pod
+        elif [[ "$1" == "--dst-pod" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then error_and_exit "--dst-pod must be followed by the name of the pod"
+            else dst_pod="$1"
+            fi
+        # --dst-dir
+        elif [[ "$1" == "--dst-dir" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then error_and_exit "--dst-dir must be followed by a directory"
+            else dst_dir="$1"
+            fi
+        # --src-context
+        elif [[ "$1" == "--src-context" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then
+                error_and_exit "--src-context must be followed by a kube context name\nrun 'kubectl config get-contexts -o name' to get a list of valid values"
+            else src_context="$1"
+            fi
+        # --dst-context
+        elif [[ "$1" == "--dst-context" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then
+                error_and_exit "--dst-context must be followed by a kube context name\nrun 'kubectl config get-contexts -o name' to get a list of valid values"
+            else dst_context="$1"
+            fi
+        # --src-namespace
+        elif [[ "$1" == "--src-namespace" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then
+                error_and_exit "--src-namespace must be followed by a namespace name"
+            else src_namespace="$1"
+            fi
+        # --dst-namespace
+        elif [[ "$1" == "--dst-namespace" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then
+                error_and_exit "--dst-namespace must be followed by a namespace name"
+            else dst_namespace="$1"
+            fi
+        # --overwrite-dst
+        elif [[ "$1" == "--overwrite-dst" ]]; then
+            if [[ "$#" == "1" ]]; then overwrite_dst=true
+            else
+                if [[ "$2" == -* ]]; then overwrite_dst=true
+                else
+                    shift
+                    overwrite_dst="$1"
+                    if [[ "$overwrite_dst" != "true" && "$overwrite_dst" != "false" ]]; then
+                        error_and_exit "--overwrite-dst can only be 'true' or 'false'"
+                    fi
+                fi
+            fi
+        # --keep-local
+        elif [[ "$1" == "--keep-local" ]]; then
+            if [[ "$#" == "1" ]]; then keep_local=true
+            else
+                if [[ "$2" == -* ]]; then keep_local=true
+                else
+                    shift
+                    keep_local="$1"
+                    if [[ "$keep_local" != "true" && "$keep_local" != "false" ]]; then
+                        error_and_exit "--keep-local can only be 'true' or 'false'"
+                    fi
+                fi
+            fi
+        # --download-only
+        elif [[ "$1" == "--download-only" ]]; then
+            if [[ "$#" == "1" ]]; then download_only=true
+            else
+                if [[ "$2" == -* ]]; then download_only=true
+                else
+                    shift
+                    download_only="$1"
+                    if [[ "$download_only" != "true" && "$download_only" != "false" ]]; then
+                        error_and_exit "--download-only can only be 'true' or 'false'"
+                    fi
+                fi
+            fi
+        # --upload-only
+        elif [[ "$1" == "--upload-only" ]]; then
+            if [[ "$#" == "1" ]]; then upload_only=true
+            else
+                if [[ "$2" == -* ]]; then upload_only=true
+                else
+                    shift
+                    upload_only="$1"
+                    if [[ "$upload_only" != "true" && "$upload_only" != "false" ]]; then
+                        error_and_exit "--upload-only can only be 'true' or 'false'"
+                    fi
+                fi
+            fi
+        # --dry-run
+        elif [[ "$1" == "--dry-run" ]]; then
+            if [[ "$#" == "1" ]]; then dry_run=true
+            else
+                if [[ "$2" == -* ]]; then dry_run=true
+                else
+                    shift
+                    dry_run="$1"
+                    if [[ "$dry_run" != "true" && "$dry_run" != "false" ]]; then
+                        error_and_exit "--dry-run can only be 'true' or 'false'"
+                    fi
+                fi
+            fi
+        # --src-container
+        elif [[ "$1" == "--src-container" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then
+                error_and_exit "--src-container must be followed by a container name"
+            else src_container="$1"
+            fi
+        # --dst-container
+        elif [[ "$1" == "--dst-container" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then
+                error_and_exit "--dst-container must be followed by a container name"
+            else dst_container="$1"
+            fi
+        # --local-file
+        elif [[ "$1" == "--local-file" ]]; then
+            shift
+            if [[ "$#" == "0" || "$1" == --* ]]; then
+                error_and_exit "--local-file must be followed by a valid file name"
+            else local_file="$1"
+            fi
+        else
+            error_and_exit "Unrecognized parameter: $1\nTry '$ME --help' for more information"
+        fi
+
+    shift
+    done
+}
+
+################################################################################################################
+#####
+#####                                           VALIDATE INPUTS
+#####
+################################################################################################################
+
+validate_inputs(){
+    echo "Validating inputs..."
+    start="$SECONDS"
+
+    if [ "$download_only" == true ] && [ "$upload_only" == true ]; then
+        error_and_exit "--download-only and --upload-only are mutually exclusive.  Only one can be true."
+    fi
+
+    ####### Verify src params #######
+    if [ "$upload_only" == false ]; then
+        ### Verify required src params have values
+        if [[ $src_pod == "" ]]; then error_and_exit "--src-pod is required"
+        elif [[ $src_dir == "" ]]; then error_and_exit "--src-dir is required"; fi
+
+        ### Set default values for missing optional src params
+        # default context is the current context of kubectl
+        if [[ $src_context == "" ]]; then src_context=$(kubectl config current-context);
+        else verify_context_exists "$src_context"; fi
+        # default namespace is the namespace set on the provided context. If one isn't set, use 'default'.
+        if [[ $src_namespace == "" ]]; then src_namespace=$(kubectl config get-contexts "$src_context" --no-headers | awk '{ print $5 }');
+            if [[ $src_namespace == "" ]]; then src_namespace="default"; fi
+        # if namespace was passed in, verify it exists in the context
+        else verify_namespace_exists "$src_context" "$src_namespace"; fi
+
+        # Verify src pod exist
+        verify_pod_exists "$src_context" "$src_namespace" "$src_pod"
+
+
+        # Verify --src-container if passed in, or determine which container to use
+        if [[ "$src_container" != "" ]]; then
+            verify_container_exists "$src_context" "$src_namespace" "$src_pod" "$src_container"
+        else
+            src_container_list=$(kubectl --context $src_context get po -n $src_namespace $src_pod -o=custom-columns="CONTAINERS:.spec.containers[*].name" --no-headers | tr ',' ' ')
+            num_src_containers=$(echo "$src_container_list" | wc -w)
+            if [[ $num_src_containers -gt 1 ]]; then
+                if [ "$interactive" == true ]; then
+                    selected_container=""
+                    echo "Pod $src_pod has multiple containers: "
+                    select_container "$src_container_list"
+                    src_container="$selected_container"
+                elif [[ "$src_container" == "" ]]; then
+                    error_and_exit "Multiple containers found in --src-pod: $src_container_list\nSince --interactive is false, --src-container is required"
+                fi
+            else
+                # if there's only one container, the list is the final value
+                src_container="$src_container_list"
+            fi
+        fi
+
+        # Verify dependencies are available on src_container
+        verify_container_dependencies "$src_context" "$src_namespace" "$src_pod" "$src_container"
+
+        # Verify src_dir exists
+        verify_dir_exists "$src_context" "$src_namespace" "$src_pod" "$src_container" "$src_dir"
+
+        ## Verify src_dir isn't empty. (If it is, there's no reason to continue)
+        if [[ $(kubectl --context $src_context -n $src_namespace exec -i $src_pod -c $src_container -- ls $src_dir | wc -l) == "0" ]]; then
+            echo "src-dir ($src_dir) is empty. Nothing to copy."
+            exit 0
+        fi
+    fi
+
+    ####### Verify dst params #######
+
+    if [ "$download_only" == false ]; then
+        ### Verify local_file exists and is a gzipped archive
+        if [ "$upload_only" == true ]; then verify_archive "$local_file"; fi
+
+        ### Verify required dst params have values
+        if [[ $dst_pod == "" ]]; then error_and_exit "--dst-pod is required unless --download-only is true"
+        elif [[ $dst_dir == "" ]]; then error_and_exit "--dst-dir is required unless --download-only is true"; fi
+
+        ### Set default values for missing optional dst params
+        # default context is the current context of kubectl
+        if [[ $dst_context == "" ]]; then dst_context=$(kubectl config current-context);
+        else verify_context_exists "$dst_context"; fi
+        # if namespace was passed in, verify it exists in the context
+        if [[ $dst_namespace == "" ]]; then dst_namespace=$(kubectl config get-contexts "$dst_context" --no-headers | awk '{ print $5 }');
+            if [[ $dst_namespace == "" ]]; then dst_namespace="default"; fi
+        else verify_namespace_exists "$dst_context" "$dst_namespace"; fi
+
+        ### Verify --overwrite-dst is passed when --interactive is false
+        if [ "$interactive" == false ]; then
+            if [ "$overwrite_dst" == "" ]; then error_and_exit "--overwrite-dst is required when --interactive is false"; fi
+        fi
+
+        # Verify dst pod exist
+        verify_pod_exists "$dst_context" "$dst_namespace" "$dst_pod"
+
+        # Verify --dst-container if passed in, or determine which container to use
+        if [[ "$dst_container" != "" ]]; then
+            verify_container_exists "$dst_context" "$dst_namespace" "$dst_pod" "$dst_container"
+        else
+            dst_container_list=$(kubectl --context $dst_context get po -n $dst_namespace $dst_pod -o=custom-columns="CONTAINERS:.spec.containers[*].name" --no-headers | tr ',' ' ')
+            num_dst_containers=$(echo "$dst_container_list" | wc -w)
+            if [[ $num_dst_containers -gt 1 ]]; then
+                if [ "$interactive" == true ]; then
+                    selected_container=""
+                    echo "Pod $dst_pod has multiple containers: "
+                    select_container "$dst_container_list"
+                    dst_container="$selected_container"
+                elif [[ "$dst_container" == "" ]]; then
+                    error_and_exit "Multiple containers found in --dst-pod: $dst_container_list\nSince --interactive is false, --dst-container is required"
+                fi
+            else
+                # if there's only one container, the list is the final value
+                dst_container="$dst_container_list"
+            fi
+        fi
+
+        # Verify dependencies are available on dst_container
+        verify_container_dependencies "$dst_context" "$dst_namespace" "$dst_pod" "$dst_container"
+
+        # Verify dst_dir exists
+        verify_dir_exists "$dst_context" "$dst_namespace" "$dst_pod" "$dst_container" "$dst_dir"
+
+        # overwrite_dst check
+        if [ "$overwrite_dst" != true ]; then
+            ## Check if dst_dir has existing contents
+            if [[ $(kubectl --context $dst_context -n $dst_namespace exec -i $dst_pod -c $dst_container -- ls $dst_dir | wc -l) != "0" ]]; then
+                # only prompt if interactive true AND overwrite_dst was not provided
+                if [ "$interactive" == true ] && [ "$overwrite_dst" == "" ]; then
+                    read -r -p "The destination ($dst_dir) is not empty. Overwrite existing contents? [n/y]: " continue_overwrite
+                    continue_overwrite=${continue_overwrite:-n}
+                    if [[ "$continue_overwrite" != "y" ]]; then
+                        echo "Not overwriting files. Exiting now."
+                        exit 0
+                    fi
+                else
+                    echo "The destination ($dst_dir) is not empty and --overwrite-dst is false."
+                    echo "Not overwriting files. Exiting now."
+                    exit 0
+                fi
+            fi
+        fi
+    fi
+
+    # Set default keep_local
+    if [[ "$keep_local" == "" ]]; then
+        keep_local=false
+        if [ "$download_only" == true ] || [ "$upload_only" == true ]; then
+            keep_local=true
+        fi
+    fi
+
+    echo -n "done "
+    time_since "$start"
+}
+
+################################################################################################################
+#####
+#####                                   DOWNLOAD FROM SOURCE POD
+#####
+################################################################################################################
+confirm_download(){
+cat << EOF
+
+Review the following download parameters:
+Context:   $src_context
+Namespace: $src_namespace
+Pod:       $src_pod
+Container: $src_container
+Directory: $src_dir
+
+EOF
+    read -r -p "Continue with download? [y/n]: " continue_download
+    continue_download=${continue_download:-y}
+    if [[ $continue_download != "y" ]]; then
+        exit 0
+    fi
+}
+
+download_from_source(){
+    start="$SECONDS"
+    ### Download files to local_file
+    # start the progress bar in background
+    show_progress "Downloading data from source pod " "$local_file" &
+    progress_pid=$! # grab process id of the background process
+    # start long running process
+    kubectl --context "$src_context" -n "$src_namespace" exec -i "$src_pod" -c "$src_container" -- tar czpf - --directory="$src_dir" . > "$local_file"
+    # send SIGUSR1 signal to the background process (tells it to clean up and exit)
+    kill -SIGUSR1 $progress_pid
+    wait # wait for it to exit
+    echo -n "done "
+    time_since "$start"
+}
+
+################################################################################################################
+#####
+#####                                   UPLOAD TO DEST POD
+#####
+################################################################################################################
+confirm_upload(){
+cat << EOF
+
+Review the following upload parameters:
+Context:   $dst_context
+Namespace: $dst_namespace
+Pod:       $dst_pod
+Container: $dst_container
+Directory: $dst_dir
+
+EOF
+    read -r -p "Continue with upload? [y/n]: " continue_upload
+    continue_upload=${continue_upload:-y}
+    if [[ $continue_upload != "y" ]]; then
+        exit 0
+    fi
+}
+
+upload_to_dest(){
+    start="$SECONDS"
+    ### Upload local_file
+    # start the progress bar in background
+    show_progress "Uploading data to destination pod " &
+    progress_pid=$! # grab process id of the background process
+    # start long running process
+    kubectl --context "$dst_context" -n "$dst_namespace" cp "$local_file" "$dst_pod":/tmp/ -c "$dst_container"
+    # send SIGUSR1 signal to the background process (tells it to clean up and exit)
+    kill -SIGUSR1 $progress_pid
+    wait # wait for it to exit
+    echo -n "done "
+    time_since "$start"
+
+    start="$SECONDS"
+    ### Extract contents on destination pod
+    # start the progress bar in background
+    show_progress "Extracting contents on destination pod " &
+    progress_pid=$! # grab process id of the background process
+    # start long running process
+    kubectl --context $dst_context -n $dst_namespace exec -i $dst_pod -c $dst_container -- tar xzpf /tmp/$local_file --directory=$dst_dir
+    # send SIGUSR1 signal to the background process (tells it to clean up and exit)
+    kill -SIGUSR1 $progress_pid
+    wait # wait for it to exit
+    echo -n "done "
+    time_since "$start"
+
+    ### Delete local_file from destination pod
+    kubectl --context $dst_context -n $dst_namespace exec -i $dst_pod -c $dst_container -- rm /tmp/$local_file
+}
+
+################################################################################################################
+#####
+#####                                   MAIN - SCRIPT STARTS HERE
+#####
+################################################################################################################
+
+main(){
+    ## Verify 'kubectl' is installed
+    if ! type kubectl &> /dev/null; then
+        error_and_exit "kubectl not installed\nTry '$ME --help' for more information"
+    fi
+
+    parse_inputs "$@"
+
+    validate_inputs
+
+    # Perform Download
+    if [ "$upload_only" == false ]; then
+        if [ "$interactive" == true ]; then confirm_download; fi
+        if [ "$dry_run" == false ]; then download_from_source; fi
+    fi
+
+    ### Perform Upload
+    if [ "$download_only" == false ]; then
+        if [ "$interactive" == true ]; then confirm_upload; fi
+        if [ "$dry_run" == false ]; then upload_to_dest; fi
+    fi
+
+    ### If --keep-only is false, delete local_file from local disk
+    if [ "$keep_local" == false ] && [ "$dry_run" == false ]; then rm "$local_file"; fi
+}
+
+# Call main with same parameters passed in to the script except replace any '='
+# with a space to make parsing values easier. This allows users to user either
+# '--src-pod=my-pod' or '--src-pod my-pod' even though the parse_inputs expects
+# the latter.
+# shellcheck disable=SC2046
+main $(echo "$@" | tr '=' ' ')
+
