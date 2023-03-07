@@ -27,6 +27,16 @@ By default, the script runs in `interactive` mode and prompts the user for any m
   - `ls`
   - `rm`
 
+## Basic Installation
+
+For Linux & Mac:
+
+```bash
+sudo wget https://raw.githubusercontent.com/dalehenries/kubecp/main/kubecp
+sudo chmod +x kubecp
+sudo mv kubecp /usr/local/bin/.
+```
+
 ## Preserving File Ownership & Permissions
 
 For the permissions and ownership to be preserved, the user on the pods needs sufficient permissions to read/write to the chosen directories.
