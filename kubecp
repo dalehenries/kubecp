@@ -11,7 +11,7 @@ set -o errexit
 
 # Set the name of this script to whatever the file is named
 ME=$(basename "$0")
-kubecp_version="1.0.0"
+kubecp_version="1.0.1"
 
 version() {
 cat << EOF
@@ -34,20 +34,20 @@ It can be used to:
 Options:
   -h, --help                    show this help message and exit
   --version                     print version and exit
-  --interactive <bool>          prompt user for missing information         default: true
-  --src-pod <string>            name of pod to copy files from              (required unless --upload-only=true)
-  --src-dir <string>            path to directory to copy files from        (required unless --upload-only=true)
-  --dst-pod <string>            name of pod to copy files to                (required unless --download-only=true)
-  --dst-dir <string>            path to directory to copy files to          (required unless --download-only=true)
-  --src-context <string>        kubectl context where --src-pod is          default: current kubectl context
-  --src-namespace <string>      namespace of --src-pod                      default: currently set namespace of --src-context
+  -i, --interactive <bool>          prompt user for missing information         default: true
+  -p, --src-pod <string>            name of pod to copy files from              (required unless --upload-only=true)
+  -d, --src-dir <string>            path to directory to copy files from        (required unless --upload-only=true)
+  -x, --src-context <string>        kubectl context where --src-pod is          default: current kubectl context
+  -n, --src-namespace <string>      namespace of --src-pod                      default: currently set namespace of --src-context
                                                                                      or 'default' if one isn't set
-  --src-container <string>      name of container in --src-pod to copy
+  -c, --src-container <string>      name of container in --src-pod to copy
                                 files from
-  --dst-context <string>        kubectl context where --dst-pod is          default: current kubectl context
-  --dst-namespace <string>      namespace --dst-pod is in                   default: currently set namespace of --dst-context
+  -P, --dst-pod <string>            name of pod to copy files to                (required unless --download-only=true)
+  -D, --dst-dir <string>            path to directory to copy files to          (required unless --download-only=true)
+  -X, --dst-context <string>        kubectl context where --dst-pod is          default: current kubectl context
+  -N, --dst-namespace <string>      namespace --dst-pod is in                   default: currently set namespace of --dst-context
                                                                                      or 'default' if one isn't set
-  --dst-container <string>      name of container in --dst-pod to copy
+  -C, --dst-container <string>      name of container in --dst-pod to copy
                                 files to
   --overwrite-dst <bool>        contents of --dst-dir will be overwritten   default: false
                                 when not empty
@@ -371,7 +371,7 @@ parse_inputs() {
         if [[ "$1" == "--version" ]]; then
             version
         # --interactive
-        elif [[ "$1" == "--interactive" ]]; then
+        elif [[ "$1" == "-i" || "$1" == "--interactive" ]]; then
             if [[ "$#" == "1" ]]; then interactive=true # last option passed and no value passed
             else
                 if [[ "$2" == -* ]]; then interactive=true # next field is another option since it starts with '-'
@@ -384,52 +384,52 @@ parse_inputs() {
                 fi
             fi
         # --src-pod
-        elif [[ "$1" == "--src-pod" ]]; then
+        elif [[ "$1" == "-p" || "$1" == "--src-pod" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then error_and_exit "--src-pod must be followed by the name of the pod"
             else src_pod="$1"
             fi
         # --src-dir
-        elif [[ "$1" == "--src-dir" ]]; then
+        elif [[ "$1" == "-d" || "$1" == "--src-dir" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then error_and_exit "--src-dir must be followed by a directory"
             else src_dir="$1"
             fi
         # --dst-pod
-        elif [[ "$1" == "--dst-pod" ]]; then
+        elif [[ "$1" == "-P" || "$1" == "--dst-pod" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then error_and_exit "--dst-pod must be followed by the name of the pod"
             else dst_pod="$1"
             fi
         # --dst-dir
-        elif [[ "$1" == "--dst-dir" ]]; then
+        elif [[ "$1" == "-D" || "$1" == "--dst-dir" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then error_and_exit "--dst-dir must be followed by a directory"
             else dst_dir="$1"
             fi
         # --src-context
-        elif [[ "$1" == "--src-context" ]]; then
+        elif [[ "$1" == "-x" || "$1" == "--src-context" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then
                 error_and_exit "--src-context must be followed by a kube context name\nrun 'kubectl config get-contexts -o name' to get a list of valid values"
             else src_context="$1"
             fi
         # --dst-context
-        elif [[ "$1" == "--dst-context" ]]; then
+        elif [[ "$1" == "-X" || "$1" == "--dst-context" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then
                 error_and_exit "--dst-context must be followed by a kube context name\nrun 'kubectl config get-contexts -o name' to get a list of valid values"
             else dst_context="$1"
             fi
         # --src-namespace
-        elif [[ "$1" == "--src-namespace" ]]; then
+        elif [[ "$1" == "-n" || "$1" == "--src-namespace" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then
                 error_and_exit "--src-namespace must be followed by a namespace name"
             else src_namespace="$1"
             fi
         # --dst-namespace
-        elif [[ "$1" == "--dst-namespace" ]]; then
+        elif [[ "$1" == "-N" || "$1" == "--dst-namespace" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then
                 error_and_exit "--dst-namespace must be followed by a namespace name"
@@ -501,14 +501,14 @@ parse_inputs() {
                 fi
             fi
         # --src-container
-        elif [[ "$1" == "--src-container" ]]; then
+        elif [[ "$1" == "-c" || "$1" == "--src-container" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then
                 error_and_exit "--src-container must be followed by a container name"
             else src_container="$1"
             fi
         # --dst-container
-        elif [[ "$1" == "--dst-container" ]]; then
+        elif [[ "$1" == "-C" || "$1" == "--dst-container" ]]; then
             shift
             if [[ "$#" == "0" || "$1" == --* ]]; then
                 error_and_exit "--dst-container must be followed by a container name"
