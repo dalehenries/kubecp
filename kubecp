@@ -11,7 +11,7 @@ set -o errexit
 
 # Set the name of this script to whatever the file is named
 ME=$(basename "$0")
-kubecp_version="1.0.1"
+kubecp_version="1.0.2"
 
 version() {
 cat << EOF
@@ -34,20 +34,20 @@ It can be used to:
 Options:
   -h, --help                    show this help message and exit
   --version                     print version and exit
-  -i, --interactive <bool>          prompt user for missing information         default: true
-  -p, --src-pod <string>            name of pod to copy files from              (required unless --upload-only=true)
-  -d, --src-dir <string>            path to directory to copy files from        (required unless --upload-only=true)
-  -x, --src-context <string>        kubectl context where --src-pod is          default: current kubectl context
-  -n, --src-namespace <string>      namespace of --src-pod                      default: currently set namespace of --src-context
+  -i, --interactive <bool>      prompt user for missing information         default: true
+  -p, --src-pod <string>        name of pod to copy files from              (required unless --upload-only=true)
+  -d, --src-dir <string>        path to directory to copy files from        (required unless --upload-only=true)
+  -x, --src-context <string>    kubectl context where --src-pod is          default: current kubectl context
+  -n, --src-namespace <string>  namespace of --src-pod                      default: currently set namespace of --src-context
                                                                                      or 'default' if one isn't set
-  -c, --src-container <string>      name of container in --src-pod to copy
+  -c, --src-container <string>  name of container in --src-pod to copy
                                 files from
-  -P, --dst-pod <string>            name of pod to copy files to                (required unless --download-only=true)
-  -D, --dst-dir <string>            path to directory to copy files to          (required unless --download-only=true)
-  -X, --dst-context <string>        kubectl context where --dst-pod is          default: current kubectl context
-  -N, --dst-namespace <string>      namespace --dst-pod is in                   default: currently set namespace of --dst-context
+  -P, --dst-pod <string>        name of pod to copy files to                (required unless --download-only=true)
+  -D, --dst-dir <string>        path to directory to copy files to          (required unless --download-only=true)
+  -X, --dst-context <string>    kubectl context where --dst-pod is          default: current kubectl context
+  -N, --dst-namespace <string>  namespace --dst-pod is in                   default: currently set namespace of --dst-context
                                                                                      or 'default' if one isn't set
-  -C, --dst-container <string>      name of container in --dst-pod to copy
+  -C, --dst-container <string>  name of container in --dst-pod to copy
                                 files to
   --overwrite-dst <bool>        contents of --dst-dir will be overwritten   default: false
                                 when not empty
@@ -84,6 +84,9 @@ Requirements:
 Example:
     # simple copy from one pod to another using default context and namespace for both
     $ME --src-pod=old-pod --src-dir=/tmp --dst-pod=new-pod --dst-dir=/tmp
+
+    # same command using short options
+    $ME -p old-pod -d /tmp -P new-pod -D /tmp
 
     # download static website files from an nginx container
     $ME --src-context developer@cluster1 \
