@@ -46,28 +46,27 @@ Why not just use `kubectl cp`?  `kubectl cp` also uses `tar` to download the fil
 
 ## Options
 
-| NAME                    |  TYPE  | DESCRIPTION                                                | DEFAULT                                           |
-| :---------------------- | :----: | :--------------------------------------------------------- | :------------------------------------------------ |
-| `-h`, `--help`          |        | Print usage info and exit                                  |                                                   |
-| `--version`             |        | Print version and exit                                     |                                                   |
-| `-i`, `--interactive`   |  bool  | Prompt user for missing information                        | `true`                                            |
-| `-p`, `--src-pod`       | string | Name of pod to copy files from                             |                                                   |
-| `-d`, `--src-dir`       | string | Path to directory to copy files from                       |                                                   |
-| `-x`, `--src-context`   | string | Kubectl context where `--src-pod` is                       | current `kubectl` context                         |
-| `-n`, `--src-namespace` | string | Namespace `--src-pod` is  in                               | current namespace of `--src-context` or `default` |
-| `-c`, `--src-container` | string | Name of container in `--src-pod` to copy files from        |                                                   |
-| `-P`, `--dst-pod`       | string | Name of pod to copy files to                               |                                                   |
-| `-D`, `--dst-dir`       | string | Path to directory to copy files. to                        |                                                   |
-| `-X`, `--dst-context`   | string | Kubectl context where `--dst-pod` is                       | current `kubectl` context                         |
-| `-N`, `--dst-namespace` | string | Namespace `--dst-pod` is  in                               | current namespace of `--dst-context` or `default` |
-| `-C`, `--dst-container` | string | Name of container in `--dst-pod` to copy files to          |                                                   |
-| `--overwrite-dst`       |  bool  | Contents of `--dst-dir` will be overwritten when not empty | `false`                                           |
-| `--download-only`       |  bool  | Skip upload, only download files to local machine          | `false`                                           |
-| `--upload-only`         |  bool  | Skip download, only upload a gzipped archive to --dst-pod  | `false`                                           |
-| `--keep-local`          |  bool  | Leave copy of downloaded archive on local machine          | `false`                                           |
-|                         |        |                                                            | `true` IF --download-only OR --upload-only        |
-| `--dry-run`             |  bool  | Do everything but don't actually download/upload anything  | `false`                                           |
-| `--local-file`          | string | Name of the gzipped archive stored on local disk           | `archive.tar.gz`                                  |
+| NAME                         |  TYPE  | DESCRIPTION                                                      | DEFAULT                                                      |
+| :--------------------------- | :----: | :--------------------------------------------------------------- | :----------------------------------------------------------- |
+| `-h`,<br />`--help`          |        | Print usage info and exit                                        |                                                              |
+| `--version`                  |        | Print version and exit                                           |                                                              |
+| `-i`,<br />`--interactive`   |  bool  | Prompt user for missing information                              | `true`                                                       |
+| `-p`,<br />`--src-pod`       | string | Name of pod to copy files from                                   |                                                              |
+| `-d`,<br />`--src-dir`       | string | Path to directory to copy files from                             |                                                              |
+| `-x`,<br />`--src-context`   | string | Kubectl context where `--src-pod` is                             | current `kubectl` context                                    |
+| `-n`,<br />`--src-namespace` | string | Namespace `--src-pod` is  in                                     | current namespace of `--src-context` or `default`            |
+| `-c`,<br />`--src-container` | string | Name of container in `--src-pod` to copy<br /> files from        |                                                              |
+| `-P`,<br />`--dst-pod`       | string | Name of pod to copy files to                                     |                                                              |
+| `-D`,<br />`--dst-dir`       | string | Path to directory to copy files. to                              |                                                              |
+| `-X`,<br />`--dst-context`   | string | Kubectl context where `--dst-pod` is                             | current `kubectl` context                                    |
+| `-N`,<br />`--dst-namespace` | string | Namespace `--dst-pod` is  in                                     | current namespace of `--dst-context` or `default`            |
+| `-C`,<br />`--dst-container` | string | Name of container in `--dst-pod` to copy<br /> files to          |                                                              |
+| `--overwrite-dst`            |  bool  | Contents of `--dst-dir` will be<br /> overwritten when not empty | `false`                                                      |
+| `--download-only`            |  bool  | Skip upload, only download files to<br /> local machine          | `false`                                                      |
+| `--upload-only`              |  bool  | Skip download, only upload a gzipped<br /> archive to --dst-pod  | `false`                                                      |
+| `--keep-local`               |  bool  | Leave copy of downloaded archive on<br /> local machine          | `false`,<br />`true` IF `--download-only` OR `--upload-only` |
+| `--dry-run`                  |  bool  | Do everything but don't actually<br /> download/upload anything  | `false`                                                      |
+| `--local-file`               | string | Name of the gzipped archive stored on<br /> local disk           | `archive.tar.gz`                                             |
 
 Options can be pass with either `--option=value` or `--option value`.
 
