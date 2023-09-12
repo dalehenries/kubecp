@@ -190,7 +190,7 @@ verify_container_exists(){
     _namespace="$2"
     _pod="$3"
     _container="$4"
-    if [[ $(kubectl --context "$_context" -n "$_namespace" get po "$_pod" -o=jsonpath="{.spec.containers[?(@.name == \"$_container\")].name}" | wc -w) != "1" ]] ; then
+    if [[ $(kubectl --context "$_context" -n "$_namespace" get po "$_pod" -o=jsonpath="{.spec.containers[?(@.name == \"$_container\")].name}" | wc -w | tr -d ' ') != "1" ]] ; then
         error_and_exit "container '$_container' doesn't exist in pod '$_pod' in namespace '$_namespace' in context '$_context'"
     fi
 }
@@ -210,7 +210,7 @@ verify_container_exists(){
 #   set's the return value in variable 'selected_container'
 #
 select_container() {
-    num_containers=$(echo "$@" | wc -w)
+    num_containers=$(echo "$@" | wc -w | tr -d ' ')
 
     PS3="Enter the number of the container to use: "
 
@@ -571,7 +571,7 @@ validate_inputs(){
             verify_container_exists "$src_context" "$src_namespace" "$src_pod" "$src_container"
         else
             src_container_list=$(kubectl --context $src_context get po -n $src_namespace $src_pod -o=custom-columns="CONTAINERS:.spec.containers[*].name" --no-headers | tr ',' ' ')
-            num_src_containers=$(echo "$src_container_list" | wc -w)
+            num_src_containers=$(echo "$src_container_list" | wc -w | tr -d ' ')
             if [[ $num_src_containers -gt 1 ]]; then
                 if [ "$interactive" == true ]; then
                     selected_container=""
@@ -594,7 +594,7 @@ validate_inputs(){
         verify_dir_exists "$src_context" "$src_namespace" "$src_pod" "$src_container" "$src_dir"
 
         ## Verify src_dir isn't empty. (If it is, there's no reason to continue)
-        if [[ $(kubectl --context $src_context -n $src_namespace exec -i $src_pod -c $src_container -- ls $src_dir | wc -l) == "0" ]]; then
+        if [[ $(kubectl --context $src_context -n $src_namespace exec -i $src_pod -c $src_container -- ls $src_dir | wc -l | tr -d ' ') == "0" ]]; then
             echo "src-dir ($src_dir) is empty. Nothing to copy."
             exit 0
         fi
@@ -632,7 +632,7 @@ validate_inputs(){
             verify_container_exists "$dst_context" "$dst_namespace" "$dst_pod" "$dst_container"
         else
             dst_container_list=$(kubectl --context $dst_context get po -n $dst_namespace $dst_pod -o=custom-columns="CONTAINERS:.spec.containers[*].name" --no-headers | tr ',' ' ')
-            num_dst_containers=$(echo "$dst_container_list" | wc -w)
+            num_dst_containers=$(echo "$dst_container_list" | wc -w | tr -d ' ')
             if [[ $num_dst_containers -gt 1 ]]; then
                 if [ "$interactive" == true ]; then
                     selected_container=""
@@ -657,7 +657,7 @@ validate_inputs(){
         # overwrite_dst check
         if [ "$overwrite_dst" != true ]; then
             ## Check if dst_dir has existing contents
-            if [[ $(kubectl --context $dst_context -n $dst_namespace exec -i $dst_pod -c $dst_container -- ls $dst_dir | wc -l) != "0" ]]; then
+            if [[ $(kubectl --context $dst_context -n $dst_namespace exec -i $dst_pod -c $dst_container -- ls $dst_dir | wc -l | tr -d ' ') != "0" ]]; then
                 # only prompt if interactive true AND overwrite_dst was not provided
                 if [ "$interactive" == true ] && [ "$overwrite_dst" == "" ]; then
                     read -r -p "The destination ($dst_dir) is not empty. Overwrite existing contents? [n/y]: " continue_overwrite
